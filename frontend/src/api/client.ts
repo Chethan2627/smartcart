@@ -20,7 +20,18 @@ export interface RootResponse {
   timestamp: string;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+/**
+ * API Base URL Configuration:
+ * - In local development: defaults to '' (empty string), enabling Vite's reverse proxy
+ *   to handle '/api' requests without CORS issues.
+ * - In production: connects to the deployed Render backend URL via import.meta.env.VITE_API_URL.
+ */
+const rawBaseUrl = import.meta.env.VITE_API_URL || '';
+export const API_BASE_URL = rawBaseUrl.replace(/\/+$/, '');
+
+export function getApiBaseUrl(): string {
+  return API_BASE_URL || '(Vite /api proxy)';
+}
 
 export async function fetchHealth(): Promise<SystemHealthResponse> {
   const response = await fetch(`${API_BASE_URL}/api/health`, {
@@ -35,7 +46,7 @@ export async function fetchHealth(): Promise<SystemHealthResponse> {
 }
 
 export async function fetchRoot(): Promise<RootResponse> {
-  const response = await fetch(`${API_BASE_URL}/`, {
+  const response = await fetch(`${API_BASE_URL}/api`, {
     headers: {
       'Content-Type': 'application/json',
     },

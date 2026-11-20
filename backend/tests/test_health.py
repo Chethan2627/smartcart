@@ -10,6 +10,12 @@ async def test_root_endpoint(async_client):
     assert data["team"] == "Hack Hive"
     assert data["status"] == "online"
 
+    # Also test /api alias for frontend proxy
+    api_response = await async_client.get("/api")
+    assert api_response.status_code == 200
+    api_data = api_response.json()
+    assert api_data["project"] == "SmartCart 2.0"
+
 
 @pytest.mark.asyncio
 async def test_health_check_endpoint(async_client):

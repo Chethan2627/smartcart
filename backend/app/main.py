@@ -30,6 +30,7 @@ app.add_middleware(
 
 
 @app.get("/", tags=["Root"])
+@app.get("/api", tags=["Root"])
 async def root():
     """Root endpoint welcoming clients and confirming service status."""
     return {
