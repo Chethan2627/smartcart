@@ -1,194 +1,500 @@
-import { useState, useEffect } from 'react'
-import { fetchHealth, fetchRoot } from './api/client'
-import type { SystemHealthResponse, RootResponse } from './api/client'
-import { CheckCircle2, AlertCircle, RefreshCw, Server, Database, Activity, ExternalLink, ShieldCheck } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import {
+  fetchStores,
+  searchProducts,
+  fetchProducts,
+} from './api/client';
+import type {
+  Store,
+  ProductSearchResultItem,
+  SearchFilterFacets,
+  SortOption,
+} from './types';
+import { AuthProvider } from './context/AuthContext';
+import { CartProvider } from './context/CartContext';
+import { useCart } from './context/useCart';
+import { Navbar } from './components/Navbar';
+import { HeroBanner } from './components/HeroBanner';
+import { FilterSidebar } from './components/FilterSidebar';
+import { ProductCard } from './components/ProductCard';
+import { ProductModal } from './components/ProductModal';
+import { CartDrawer } from './components/CartDrawer';
+import { AuthModal } from './components/AuthModal';
+import { CheckoutModal } from './components/CheckoutModal';
+import { ManagerDashboard } from './components/manager/ManagerDashboard';
+import { AdminDashboard } from './components/admin/AdminDashboard';
+import { LoadingSkeleton } from './components/LoadingSkeleton';
+import { EmptyState } from './components/EmptyState';
+import { Toast } from './components/Toast';
+import { Footer } from './components/Footer';
+import {
+  SlidersHorizontal,
+  RefreshCw,
+  AlertCircle,
+  Sparkles,
+} from 'lucide-react';
 
-export function App() {
-  const [health, setHealth] = useState<SystemHealthResponse | null>(null)
-  const [rootInfo, setRootInfo] = useState<RootResponse | null>(null)
-  const [loading, setLoading] = useState<boolean>(true)
-  const [error, setError] = useState<string | null>(null)
+const DEFAULT_FACETS: SearchFilterFacets = {
+  categories: [],
+  brands: [],
+  min_price_paise: 0,
+  max_price_paise: 0,
+};
 
-  const checkBackendStatus = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const [healthData, rootData] = await Promise.all([
-        fetchHealth(),
-        fetchRoot(),
-      ])
-      setHealth(healthData)
-      setRootInfo(rootData)
-    } catch (err: any) {
-      setError(err?.message || 'Failed to connect to FastAPI backend at http://localhost:8000')
-    } finally {
-      setLoading(false)
+interface StorefrontContentProps {
+  stores: Store[];
+  onNavigateToManager: () => void;
+  onNavigateToAdmin: () => void;
+}
+
+function StorefrontContent({
+  stores,
+  onNavigateToManager,
+  onNavigateToAdmin,
+}: StorefrontContentProps) {
+  // Store management
+  const [selectedStoreId, setSelectedStoreId] = useState<string | null>(null);
+
+  const currentStore = useMemo<Store | null>(() => {
+    if (selectedStoreId) {
+      const match = stores.find((s) => s.id === selectedStoreId);
+      if (match) return match;
     }
-  }
+    return stores.length > 0 ? stores[0] : null;
+  }, [stores, selectedStoreId]);
 
+  const handleSelectStore = useCallback((store: Store) => {
+    setSelectedStoreId(store.id);
+  }, []);
+
+  // Search and filter parameters
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedBrand, setSelectedBrand] = useState<string | null>(null);
+  const [inStockOnly, setInStockOnly] = useState<boolean>(false);
+  const [sortBy, setSortBy] = useState<SortOption>('relevance');
+
+  // Search results & facets state
+  const [products, setProducts] = useState<ProductSearchResultItem[]>([]);
+  const [facets, setFacets] = useState<SearchFilterFacets>(DEFAULT_FACETS);
+  const [totalResults, setTotalResults] = useState<number>(0);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // UI modals and toasts
+  const [selectedProduct, setSelectedProduct] = useState<ProductSearchResultItem | null>(null);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState<boolean>(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Cart context integration
+  const {
+    items: cartItems,
+    addToCart,
+    updateQuantity,
+    setIsCartOpen,
+    onStockExpiredCallbacks,
+  } = useCart();
+
+  // Authoritative cart quantity lookup by productId
+  const cartQuantities = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const item of cartItems) {
+      map[item.product_id] = item.qty;
+    }
+    return map;
+  }, [cartItems]);
+
+  // 2. Query products using OpenSearch search endpoint (scoped to current store)
+  const loadStoreProducts = useCallback(async () => {
+    if (!currentStore) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const resp = await searchProducts({
+        storeId: currentStore.id,
+        q: searchQuery,
+        category: selectedCategory || undefined,
+        brand: selectedBrand || undefined,
+        inStockOnly,
+        sortBy,
+        pageSize: 40,
+        useNlp: true,
+      });
+
+      // If OpenSearch returned items, use them directly
+      if (resp.items && resp.items.length > 0) {
+        setProducts(resp.items);
+        setFacets(resp.filters || DEFAULT_FACETS);
+        setTotalResults(resp.total);
+      } else {
+        // Fallback: If OpenSearch has no items yet, fetch directly from PostgreSQL catalogue
+        const catProducts = await fetchProducts({
+          category: selectedCategory || undefined,
+          brand: selectedBrand || undefined,
+          limit: 40,
+        });
+
+        // Map PostgreSQL catalogue items into ProductSearchResultItem structure
+        const mappedItems: ProductSearchResultItem[] = catProducts.map((p) => ({
+          id: `${p.id}_${currentStore.id}`,
+          product_id: p.id,
+          store_id: currentStore.id,
+          sku: p.sku,
+          name: p.name,
+          brand: p.brand,
+          category: p.category,
+          description: p.description,
+          price_paise: p.price_paise,
+          image_url: p.attributes?.image?.secure_url || p.attributes?.image_url,
+          is_active: p.is_active,
+          qty_on_hand: 25,
+          qty_reserved: 0,
+          qty_available: 25,
+          is_in_stock: true,
+        }));
+
+        setProducts(mappedItems);
+        setTotalResults(mappedItems.length);
+        setFacets(resp.filters || DEFAULT_FACETS);
+      }
+    } catch (err: unknown) {
+      console.error('Product search error:', err);
+      const msg = err instanceof Error ? err.message : 'Error retrieving products';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  }, [currentStore, searchQuery, selectedCategory, selectedBrand, inStockOnly, sortBy]);
+
+  // Load products when store or filters change
   useEffect(() => {
-    checkBackendStatus()
-  }, [])
+    let ignore = false;
+    const fetchStoreCatalog = async () => {
+      if (currentStore && !ignore) {
+        await loadStoreProducts();
+      }
+    };
+    fetchStoreCatalog();
+    return () => {
+      ignore = true;
+    };
+  }, [currentStore, loadStoreProducts]);
+
+  // Subscribe to reservation expiration events to auto-refresh available inventory
+  useEffect(() => {
+    const callback = () => {
+      loadStoreProducts();
+    };
+    const callbacksSet = onStockExpiredCallbacks.current;
+    callbacksSet.add(callback);
+    return () => {
+      callbacksSet.delete(callback);
+    };
+  }, [loadStoreProducts, onStockExpiredCallbacks]);
+
+  // 3. Cart Handlers (delegates to PostgreSQL reservation backend)
+  const handleAddToCart = async (product: ProductSearchResultItem) => {
+    if (!currentStore) return;
+    const ok = await addToCart(currentStore.id, product.product_id, 1);
+    if (ok) {
+      setToastMessage(`Reserved 1x ${product.name} (Held for 10 mins)`);
+    }
+  };
+
+  const handleUpdateCartQuantity = async (product: ProductSearchResultItem, quantity: number) => {
+    const ok = await updateQuantity(product.product_id, quantity);
+    if (ok) {
+      if (quantity <= 0) {
+        setToastMessage(`Released reservation for ${product.name}`);
+      } else {
+        setToastMessage(`Updated ${product.name} quantity to ${quantity}`);
+      }
+    }
+  };
+
+  const handleResetFilters = () => {
+    setSearchQuery('');
+    setSelectedCategory(null);
+    setSelectedBrand(null);
+    setInStockOnly(false);
+    setSortBy('relevance');
+  };
+
+  const handleSelectSuggestionProduct = (productId: string) => {
+    const found = products.find((p) => p.product_id === productId);
+    if (found) {
+      setSelectedProduct(found);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-white">
-      {/* Top Header */}
-      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center font-bold text-xl text-white shadow-lg shadow-indigo-500/25">
-            S
-          </div>
+    <div className="min-h-screen bg-slate-100/70 text-slate-900 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
+      )}
+
+      {/* Navigation Bar */}
+      <Navbar
+        stores={stores}
+        currentStore={currentStore}
+        onSelectStore={handleSelectStore}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
+        onSearchSubmit={setSearchQuery}
+        cartCount={cartItems.reduce((acc, i) => acc + i.qty, 0)}
+        onOpenCartSummary={() => setIsCartOpen(true)}
+        onSelectSuggestionProduct={handleSelectSuggestionProduct}
+        onNavigateToManager={onNavigateToManager}
+        onNavigateToAdmin={onNavigateToAdmin}
+      />
+
+      {/* Hero Banner */}
+      <HeroBanner
+        activeCategory={selectedCategory}
+        onSelectCategory={(cat) => setSelectedCategory(cat === selectedCategory ? null : cat)}
+        storeName={currentStore?.name}
+        storeCity={currentStore?.city}
+      />
+
+      {/* Main Content Area */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full">
+        {/* Results Header Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-6 mb-6 border-b border-slate-200/80 gap-4">
           <div>
-            <div className="flex items-center space-x-2">
-              <span className="font-bold text-lg text-white tracking-tight">SmartCart</span>
-              <span className="text-xs bg-indigo-500/20 text-indigo-400 font-semibold px-2 py-0.5 rounded-full border border-indigo-500/30">
-                v2.0
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Team Hack Hive • CIT Gubbi</p>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-4">
-          <a
-            href="http://localhost:8000/docs"
-            target="_blank"
-            rel="noreferrer"
-            className="flex items-center space-x-1.5 text-xs text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 transition"
-          >
-            <ExternalLink className="w-3.5 h-3.5 text-indigo-400" />
-            <span>FastAPI Swagger Docs</span>
-          </a>
-          <button
-            onClick={checkBackendStatus}
-            disabled={loading}
-            className="flex items-center space-x-1.5 text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg shadow-sm transition disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            <span>Check Connectivity</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Hero Section */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-6 py-12 flex flex-col items-center justify-center text-center">
-        <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-6">
-          <Activity className="w-3.5 h-3.5 text-indigo-400" />
-          <span>Phase 0: Project Foundation Active</span>
-        </div>
-
-        <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-white max-w-3xl leading-tight">
-          Smarter Discovery. Reliable Inventory. <br />
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-violet-400 to-pink-400">
-            Seamless Shopping.
-          </span>
-        </h1>
-
-        <p className="mt-4 text-base sm:text-lg text-slate-400 max-w-2xl">
-          Multi-store intelligent retail platform powered by Aiven cloud infrastructure. Built for zero overselling, typo-tolerant search, and asynchronous event-driven orders.
-        </p>
-
-        {/* Connectivity Status Banner */}
-        <div className="w-full max-w-3xl mt-10 p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl text-left">
-          <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-            <div className="flex items-center space-x-2">
-              <Server className="w-5 h-5 text-indigo-400" />
-              <h2 className="text-base font-semibold text-white">Full-Stack Connectivity Status</h2>
-            </div>
-            <div className="flex items-center space-x-2">
-              {loading ? (
-                <span className="inline-flex items-center text-xs text-yellow-400 bg-yellow-400/10 px-2.5 py-1 rounded-full border border-yellow-400/20">
-                  <RefreshCw className="w-3 h-3 animate-spin mr-1.5" /> Checking backend...
+            <h2 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
+              {searchQuery ? (
+                <span>
+                  Results for &ldquo;<span className="text-emerald-700">{searchQuery}</span>&rdquo;
                 </span>
-              ) : error ? (
-                <span className="inline-flex items-center text-xs text-rose-400 bg-rose-400/10 px-2.5 py-1 rounded-full border border-rose-400/20">
-                  <AlertCircle className="w-3 h-3 mr-1.5" /> Backend Unreachable
-                </span>
+              ) : selectedCategory ? (
+                <span>{selectedCategory}</span>
               ) : (
-                <span className="inline-flex items-center text-xs text-emerald-400 bg-emerald-400/10 px-2.5 py-1 rounded-full border border-emerald-400/20">
-                  <CheckCircle2 className="w-3 h-3 mr-1.5" /> Frontend & Backend Connected
+                <span>Available Products</span>
+              )}
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-500 mt-1">
+              {loading ? (
+                'Checking store inventory...'
+              ) : (
+                <span>
+                  Found <strong>{totalResults}</strong> items at{' '}
+                  <span className="font-semibold text-slate-700">
+                    {currentStore?.name || 'Selected Store'}
+                  </span>
                 </span>
               )}
-            </div>
+            </p>
           </div>
 
-          {error ? (
-            <div className="mt-4 p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-sm flex items-start space-x-3">
-              <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold">Connection Error</p>
-                <p className="text-xs text-rose-400 mt-1">{error}</p>
-                <p className="text-xs text-slate-400 mt-2">
-                  Ensure the FastAPI backend server is running via{' '}
-                  <code className="text-slate-300 bg-slate-800 px-1 py-0.5 rounded">
-                    uvicorn app.main:app --port 8000
-                  </code>
-                </p>
+          {/* Mobile Filter Toggle Button */}
+          <div className="flex items-center space-x-3 lg:hidden">
+            <button
+              onClick={() => setMobileFiltersOpen(true)}
+              className="flex items-center space-x-2 bg-white px-4 py-2 rounded-xl border border-slate-200 text-xs font-bold text-slate-700 shadow-xs hover:bg-slate-50"
+            >
+              <SlidersHorizontal className="w-4 h-4 text-emerald-600" />
+              <span>Filters & Sort</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Layout: Sidebar + Product Grid */}
+        <div className="flex flex-col lg:flex-row gap-8 items-start">
+          {/* Faceted Filter Sidebar */}
+          <FilterSidebar
+            facets={facets}
+            selectedCategory={selectedCategory}
+            onSelectCategory={setSelectedCategory}
+            selectedBrand={selectedBrand}
+            onSelectBrand={setSelectedBrand}
+            inStockOnly={inStockOnly}
+            onToggleInStockOnly={setInStockOnly}
+            sortBy={sortBy}
+            onChangeSortBy={setSortBy}
+            onResetFilters={handleResetFilters}
+            totalResults={totalResults}
+            isOpenMobile={mobileFiltersOpen}
+            onCloseMobile={() => setMobileFiltersOpen(false)}
+          />
+
+          {/* Products View Area */}
+          <div className="flex-1 min-w-0">
+            {/* Error State */}
+            {error ? (
+              <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 text-center max-w-lg mx-auto my-8">
+                <AlertCircle className="w-8 h-8 text-rose-500 mx-auto mb-2" />
+                <h3 className="font-bold text-slate-900 text-sm">Failed to load catalogue</h3>
+                <p className="text-xs text-slate-600 mt-1">{error}</p>
+                <button
+                  onClick={loadStoreProducts}
+                  className="mt-4 inline-flex items-center space-x-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-4 py-2 rounded-xl transition"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Retry Connection</span>
+                </button>
               </div>
-            </div>
-          ) : health ? (
-            <div className="mt-4 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                  <span className="text-slate-500 block mb-1">Backend Version</span>
-                  <span className="font-mono text-slate-200">{health.version}</span>
-                </div>
-                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800">
-                  <span className="text-slate-500 block mb-1">Environment</span>
-                  <span className="font-mono text-emerald-400 uppercase">{health.environment}</span>
-                </div>
+            ) : loading ? (
+              /* Loading State */
+              <LoadingSkeleton />
+            ) : products.length === 0 ? (
+              /* Empty State */
+              <EmptyState
+                searchQuery={searchQuery}
+                hasFilters={Boolean(selectedCategory || selectedBrand || inStockOnly)}
+                onReset={handleResetFilters}
+              />
+            ) : (
+              /* Product Listing Cards Grid */
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6">
+                {products.map((product) => (
+                  <ProductCard
+                    key={product.id || product.product_id}
+                    product={product}
+                    cartQuantity={cartQuantities[product.product_id] || 0}
+                    onAddToCart={handleAddToCart}
+                    onUpdateCartQuantity={handleUpdateCartQuantity}
+                    onViewDetails={setSelectedProduct}
+                  />
+                ))}
               </div>
+            )}
 
-              {/* Mandatory Architecture Services Checklist */}
-              <div>
-                <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-                  Mandatory Infrastructure (Aiven Services)
-                </h3>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Database className="w-4 h-4 text-blue-400" />
-                      <span className="text-xs text-slate-300 font-medium">PostgreSQL</span>
-                    </div>
-                    <span className="text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded">Phase 1</span>
-                  </div>
-
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <Activity className="w-4 h-4 text-purple-400" />
-                      <span className="text-xs text-slate-300 font-medium">Apache Kafka</span>
-                    </div>
-                    <span className="text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded">Phase 1/5</span>
-                  </div>
-
-                  <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex items-center justify-between">
-                    <div className="flex items-center space-x-2">
-                      <ShieldCheck className="w-4 h-4 text-amber-400" />
-                      <span className="text-xs text-slate-300 font-medium">OpenSearch</span>
-                    </div>
-                    <span className="text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded">Phase 1/6</span>
-                  </div>
+            {/* Quick Informational Bottom Notice */}
+            {!loading && products.length > 0 && (
+              <div className="mt-12 p-4 rounded-2xl bg-emerald-50/70 border border-emerald-100 flex items-center justify-between text-xs text-emerald-900">
+                <div className="flex items-center space-x-2">
+                  <Sparkles className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    Showing real-time stock balances synchronized with <strong>Aiven OpenSearch</strong> and <strong>PostgreSQL</strong>.
+                  </span>
                 </div>
+                <span className="text-[11px] font-semibold text-emerald-700 hidden sm:inline">
+                  Zero Overselling • 10-Min Hold Guarantee
+                </span>
               </div>
-
-              {rootInfo && (
-                <div className="p-3 rounded-xl bg-indigo-950/20 border border-indigo-900/30 text-xs text-indigo-300">
-                  <span className="font-semibold text-white">Project Verified: </span>
-                  {rootInfo.project} — {rootInfo.institution}
-                </div>
-              )}
-            </div>
-          ) : null}
+            )}
+          </div>
         </div>
       </main>
 
+      {/* Product Details Modal */}
+      <ProductModal
+        product={selectedProduct}
+        store={currentStore}
+        onClose={() => setSelectedProduct(null)}
+        cartQuantity={selectedProduct ? cartQuantities[selectedProduct.product_id] || 0 : 0}
+        onAddToCart={handleAddToCart}
+        onUpdateCartQuantity={handleUpdateCartQuantity}
+      />
+
+      {/* Slide-out Cart Drawer with 10-Minute Reservation Timer */}
+      <CartDrawer currentStoreName={currentStore?.name} />
+
+      {/* Atomic Checkout Modal with Idempotency Protection */}
+      <CheckoutModal
+        currentStoreName={currentStore?.name}
+        onOrderSuccess={() => {
+          loadStoreProducts();
+        }}
+      />
+
       {/* Footer */}
-      <footer className="border-t border-slate-800 py-6 text-center text-xs text-slate-500">
-        <p>SmartCart 2.0 • Hack Hive • Channabasaveshwara Institute of Technology (CIT), Gubbi</p>
-        <p className="mt-1">Build Bangalore 2.0 Hackathon • Powered by Aiven</p>
-      </footer>
+      <Footer />
     </div>
-  )
+  );
 }
 
-export default App
+function MainContent() {
+  const [currentView, setCurrentView] = useState<'storefront' | 'manager' | 'admin'>(() => {
+    if (typeof window !== 'undefined') {
+      if (window.location.hash === '#admin') return 'admin';
+      if (window.location.hash === '#manager') return 'manager';
+    }
+    return 'storefront';
+  });
+  const [stores, setStores] = useState<Store[]>([]);
+
+  useEffect(() => {
+    let mounted = true;
+    fetchStores()
+      .then((storeList) => {
+        if (mounted && storeList.length > 0) {
+          setStores(storeList);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load stores:', err);
+      });
+
+    const handleHash = () => {
+      if (window.location.hash === '#admin') {
+        setCurrentView('admin');
+      } else if (window.location.hash === '#manager') {
+        setCurrentView('manager');
+      } else {
+        setCurrentView('storefront');
+      }
+    };
+    window.addEventListener('hashchange', handleHash);
+    return () => {
+      mounted = false;
+      window.removeEventListener('hashchange', handleHash);
+    };
+  }, []);
+
+  const navigateToAdmin = () => {
+    window.location.hash = 'admin';
+    setCurrentView('admin');
+  };
+
+  const navigateToManager = () => {
+    window.location.hash = 'manager';
+    setCurrentView('manager');
+  };
+
+  const navigateToStorefront = () => {
+    window.location.hash = '';
+    setCurrentView('storefront');
+  };
+
+  return (
+    <>
+      {currentView === 'admin' ? (
+        <AdminDashboard
+          stores={stores}
+          onReturnToStorefront={navigateToStorefront}
+          onNavigateToManager={navigateToManager}
+        />
+      ) : currentView === 'manager' ? (
+        <ManagerDashboard
+          stores={stores}
+          onReturnToStorefront={navigateToStorefront}
+          onNavigateToAdmin={navigateToAdmin}
+        />
+      ) : (
+        <StorefrontContent
+          stores={stores}
+          onNavigateToManager={navigateToManager}
+          onNavigateToAdmin={navigateToAdmin}
+        />
+      )}
+      {/* Universal Authentication Modal */}
+      <AuthModal />
+    </>
+  );
+}
+
+export function App() {
+  return (
+    <AuthProvider>
+      <CartProvider>
+        <MainContent />
+      </CartProvider>
+    </AuthProvider>
+  );
+}
+
+export default App;

@@ -1,4 +1,4 @@
-# Python
+# Python virtual environments & packages
 __pycache__/
 *.py[cod]
 *$py.class
@@ -20,7 +20,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-.venv
+.venv/
+backend/.venv/
 venv/
 ENV/
 
@@ -31,8 +32,9 @@ htmlcov/
 
 # Node & Frontend
 node_modules/
-.npm
+frontend/node_modules/
 dist/
+frontend/dist/
 dist-ssr/
 *.local
 
@@ -40,9 +42,21 @@ dist-ssr/
 .env
 .env.*
 !.env.example
+**/.env
+**/.env.*
+!**/.env.example
+backend/.env
+backend/.env.aiven
+certs/
+backend/certs/
 *.pem
 *.cert
 *.key
+
+# Backups & Temp
+smartcart-backups/
+*.bak
+*.tmp
 
 # IDE & OS
 .vscode/
