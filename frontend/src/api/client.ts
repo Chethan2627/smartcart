@@ -1,6 +1,6 @@
 /**
  * SmartCart 2.0 - Centralized API Service Client
- * Uses environment variable VITE_API_URL, falling back to empty string for Vite proxy.
+ * Uses environment variable VITE_API_BASE_URL (or fallback VITE_API_URL), falling back to empty string for Vite proxy.
  */
 
 import type {
@@ -53,7 +53,7 @@ export interface RootResponse {
   timestamp: string;
 }
 
-const rawBaseUrl = import.meta.env.VITE_API_URL || '';
+const rawBaseUrl = import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '';
 export const API_BASE_URL = rawBaseUrl.replace(/\/+$/, '');
 
 export function getApiBaseUrl(): string {
